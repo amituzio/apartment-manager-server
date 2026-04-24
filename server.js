@@ -6,156 +6,115 @@ require('dotenv').config();
 
 const app = express();
 
-// Middleware
-app.use(cors());
-app.use(bodyParser.json({ limit: '10mb' }));
-app.use(bodyParser.urlencoded({ limit: '10mb', extended: true }));
+// CRITICAL: Configure body parser BEFORE routes
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type']
+}));
 
-// Store credentials in memory
+// Parse JSON with proper limits
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
+app.use(bodyParser.json({ limit: '50mb' }));
+
+// Store Twilio config
 let twilioConfig = null;
 
-console.log('✅ Apartment Manager Server Starting...');
+console.log('✅ Server starting...');
 
-// ============================================
-// HEALTH CHECK
-// ============================================
-
+// Health check
 app.get('/api/health', (req, res) => {
   res.json({
     status: 'running',
-    message: 'Server is active',
-    timestamp: new Date().toISOString(),
-    version: '3.0.0',
+    version: '4.0',
     twilioConfigured: !!twilioConfig
   });
 });
 
-// ============================================
-// TWILIO CONFIGURATION
-// ============================================
-
 // Save Twilio Config
-app.post('/api/save-twilio-config', (req, res) => {
+app.post('/api/save-twilio-config', express.json(), (req, res) => {
   try {
     const { accountSid, authToken, fromNumber } = req.body;
 
     if (!accountSid || !authToken || !fromNumber) {
       return res.status(400).json({
         success: false,
-        error: 'Missing: accountSid, authToken, or fromNumber'
+        error: 'Missing fields'
       });
     }
 
-    twilioConfig = {
-      accountSid,
-      authToken,
-      fromNumber
-    };
+    twilioConfig = { accountSid, authToken, fromNumber };
+    console.log('✅ Twilio config saved');
 
-    console.log('✅ Twilio config saved on server');
-
-    res.json({
-      success: true,
-      message: 'Twilio credentials saved successfully'
-    });
+    res.json({ success: true, message: 'Saved' });
   } catch (error) {
-    console.error('Error saving config:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// Check Twilio Status
-app.get('/api/twilio-status', (req, res) => {
-  res.json({
-    configured: !!twilioConfig,
-    message: twilioConfig ? 'Twilio is configured' : 'Twilio is not configured'
-  });
-});
-
-// Test Twilio Connection
-app.post('/api/test-twilio', (req, res) => {
+// Test Twilio
+app.post('/api/test-twilio', express.json(), (req, res) => {
   try {
     const { accountSid, authToken, fromNumber } = req.body;
 
     if (!accountSid || !authToken || !fromNumber) {
-      return res.status(400).json({
-        success: false,
-        error: 'Missing credentials'
-      });
+      return res.status(400).json({ success: false, error: 'Missing fields' });
     }
 
-    // Simple validation
     if (accountSid.startsWith('AC') && authToken.length > 20) {
-      res.json({
-        success: true,
-        message: 'Twilio credentials are valid',
-        accountSid: accountSid
-      });
+      res.json({ success: true, message: 'Valid' });
     } else {
-      res.status(400).json({
-        success: false,
-        error: 'Invalid credential format'
-      });
+      res.status(400).json({ success: false, error: 'Invalid format' });
     }
   } catch (error) {
-    res.status(400).json({
-      success: false,
-      error: error.message
-    });
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// ============================================
-// SEND SMS - THE MAIN ROUTE
-// ============================================
-
-app.post('/api/send-sms', async (req, res) => {
+// MAIN SMS SENDING ROUTE - THIS IS THE CRITICAL ONE
+app.post('/api/send-sms', express.json(), async (req, res) => {
   try {
-    console.log('📨 Received SMS request');
-    console.log('Request body:', JSON.stringify(req.body));
+    console.log('📨 SMS Request received');
+    console.log('Headers:', req.headers);
+    console.log('Body:', req.body);
+    console.log('Body type:', typeof req.body);
+    console.log('Body keys:', Object.keys(req.body || {}));
 
     const { to, message } = req.body;
 
-    // Validate inputs
-    if (!to) {
-      console.error('❌ Missing phone number');
+    console.log('Extracted - to:', to);
+    console.log('Extracted - message:', message);
+    console.log('to exists:', !!to);
+    console.log('message exists:', !!message);
+
+    // Validate
+    if (!to || !message) {
+      console.error('❌ Missing fields - to:', !!to, 'message:', !!message);
       return res.status(400).json({
         success: false,
-        error: 'Missing phone number (to)'
+        error: 'Missing phone or message',
+        received: { to, message }
       });
     }
 
-    if (!message) {
-      console.error('❌ Missing message');
-      return res.status(400).json({
-        success: false,
-        error: 'Missing message'
-      });
-    }
-
-    // Check if Twilio is configured
+    // Check Twilio config
     if (!twilioConfig) {
-      console.error('❌ Twilio not configured on server');
       return res.status(400).json({
         success: false,
-        error: 'Twilio not configured. Please configure credentials first.',
-        needsConfig: true
+        error: 'Twilio not configured'
       });
     }
 
     const { accountSid, authToken, fromNumber } = twilioConfig;
 
-    console.log(`📱 Sending SMS to: ${to}`);
+    console.log(`📱 Sending to: ${to}`);
     console.log(`📝 Message: ${message}`);
-    console.log(`📞 From: ${fromNumber}`);
 
     // Create Twilio client
     const client = twilio(accountSid, authToken);
 
-    // Send the SMS
+    // Send SMS
     const result = await client.messages.create({
       body: message,
       from: fromNumber,
@@ -166,67 +125,27 @@ app.post('/api/send-sms', async (req, res) => {
 
     res.json({
       success: true,
-      message: 'SMS sent successfully!',
+      message: 'SMS sent!',
       messageSid: result.sid,
-      status: result.status,
-      sentTo: to
+      status: result.status
     });
 
   } catch (error) {
-    console.error('❌ Error sending SMS:', error.message);
+    console.error('❌ Error:', error.message);
     res.status(400).json({
       success: false,
-      error: error.message,
-      details: 'Check your Twilio credentials and phone number format'
+      error: error.message
     });
   }
-});
-
-// ============================================
-// CATCH-ALL ROUTES
-// ============================================
-
-app.use((req, res) => {
-  res.status(404).json({
-    error: 'Route not found',
-    path: req.path,
-    method: req.method
-  });
 });
 
 // Error handler
 app.use((err, req, res, next) => {
   console.error('Server error:', err);
-  res.status(500).json({
-    error: 'Internal server error',
-    message: err.message
-  });
+  res.status(500).json({ error: err.message });
 });
-
-// ============================================
-// START SERVER
-// ============================================
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
-  console.log(`
-╔════════════════════════════════════════════════════════╗
-║                                                        ║
-║   🏢 APARTMENT MANAGER SERVER v3.0                     ║
-║   ✅ Running on port ${PORT}                              ║
-║   ✅ Express.js enabled                                ║
-║   ✅ CORS enabled                                      ║
-║   ✅ Twilio SMS ready                                  ║
-║                                                        ║
-║   Available Endpoints:                                 ║
-║   • GET  /api/health                                   ║
-║   • POST /api/save-twilio-config                       ║
-║   • POST /api/test-twilio                              ║
-║   • GET  /api/twilio-status                            ║
-║   • POST /api/send-sms  ⭐ (Main SMS Route)            ║
-║                                                        ║
-║   Ready to send SMS messages! 📱                       ║
-║                                                        ║
-╚════════════════════════════════════════════════════════╝
-  `);
+  console.log(`\n✅ Server running on port ${PORT}\n`);
 });
