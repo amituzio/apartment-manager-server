@@ -11,11 +11,62 @@ const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 
-// In-memory store for credentials (in production, use a database)
-let credentials = {};
+// In-memory store for credentials (persists during server runtime)
+let credentials = {
+  twilio: null
+};
 
 // ============================================
-// TWILIO ROUTES
+// CREDENTIAL MANAGEMENT
+// ============================================
+
+// Save Twilio Credentials from Frontend
+app.post('/api/save-twilio-config', async (req, res) => {
+  try {
+    const { accountSid, authToken, fromNumber } = req.body;
+
+    if (!accountSid || !authToken || !fromNumber) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Missing required fields: accountSid, authToken, fromNumber' 
+      });
+    }
+
+    // Store credentials in memory
+    credentials.twilio = {
+      accountSid,
+      authToken,
+      fromNumber
+    };
+
+    console.log('✅ Twilio credentials saved successfully');
+
+    return res.json({
+      success: true,
+      message: 'Twilio credentials saved successfully!',
+      configured: true
+    });
+  } catch (error) {
+    console.error('Error saving Twilio config:', error.message);
+    return res.status(400).json({
+      success: false,
+      message: error.message
+    });
+  }
+});
+
+// Get Twilio Configuration Status
+app.get('/api/twilio-status', (req, res) => {
+  const isConfigured = credentials.twilio && credentials.twilio.accountSid && credentials.twilio.authToken && credentials.twilio.fromNumber;
+  
+  return res.json({
+    configured: isConfigured,
+    message: isConfigured ? 'Twilio is configured' : 'Twilio is not configured'
+  });
+});
+
+// ============================================
+// TWILIO SMS ROUTES
 // ============================================
 
 // Test Twilio Connection
@@ -37,13 +88,6 @@ app.post('/api/test-twilio', async (req, res) => {
     const account = await client.api.accounts(accountSid).fetch();
 
     if (account.status === 'active') {
-      // Store credentials for later use
-      credentials.twilio = {
-        accountSid,
-        authToken,
-        fromNumber
-      };
-
       return res.json({
         success: true,
         message: 'Twilio connection successful!',
@@ -52,7 +96,7 @@ app.post('/api/test-twilio', async (req, res) => {
       });
     }
   } catch (error) {
-    console.error('Twilio error:', error.message);
+    console.error('Twilio test error:', error.message);
     return res.status(400).json({
       success: false,
       message: `Twilio error: ${error.message}`,
@@ -61,18 +105,29 @@ app.post('/api/test-twilio', async (req, res) => {
   }
 });
 
-// Send SMS via Twilio
+// Send SMS using stored credentials (Called by Frontend)
 app.post('/api/send-sms', async (req, res) => {
   try {
-    const { to, message, accountSid, authToken, fromNumber } = req.body;
+    const { to, message } = req.body;
 
-    if (!to || !message || !accountSid || !authToken || !fromNumber) {
+    if (!to || !message) {
       return res.status(400).json({ 
         success: false, 
-        message: 'Missing required fields' 
+        message: 'Missing phone number or message' 
       });
     }
 
+    // Check if Twilio is configured
+    if (!credentials.twilio || !credentials.twilio.accountSid) {
+      return res.status(400).json({
+        success: false,
+        message: 'Twilio not configured on server. Please configure credentials first.',
+        needsConfig: true
+      });
+    }
+
+    const { accountSid, authToken, fromNumber } = credentials.twilio;
+    
     // Validate phone number format
     const phoneRegex = /^\+?[1-9]\d{1,14}$/;
     if (!phoneRegex.test(to)) {
@@ -82,46 +137,64 @@ app.post('/api/send-sms', async (req, res) => {
       });
     }
 
+    // Create Twilio client
     const client = twilio(accountSid, authToken);
 
+    console.log(`📱 Sending SMS to ${to}...`);
+
+    // Send SMS
     const result = await client.messages.create({
       body: message,
       from: fromNumber,
       to: to
     });
 
+    console.log(`✅ SMS sent! Message SID: ${result.sid}`);
+
     return res.json({
       success: true,
       message: 'SMS sent successfully!',
       messageSid: result.sid,
-      status: result.status
+      status: result.status,
+      sentTo: to
     });
   } catch (error) {
-    console.error('SMS sending error:', error.message);
+    console.error('❌ SMS sending error:', error.message);
     return res.status(400).json({
       success: false,
-      message: `Failed to send SMS: ${error.message}`
+      message: `Failed to send SMS: ${error.message}`,
+      error: error.message
     });
   }
 });
 
-// Send WhatsApp via Twilio
+// Send WhatsApp using Twilio
 app.post('/api/send-whatsapp', async (req, res) => {
   try {
-    const { to, message, accountSid, authToken, fromNumber } = req.body;
+    const { to, message } = req.body;
 
-    if (!to || !message || !accountSid || !authToken || !fromNumber) {
+    if (!to || !message) {
       return res.status(400).json({ 
         success: false, 
-        message: 'Missing required fields' 
+        message: 'Missing phone number or message' 
       });
     }
 
+    if (!credentials.twilio || !credentials.twilio.accountSid) {
+      return res.status(400).json({
+        success: false,
+        message: 'Twilio not configured on server'
+      });
+    }
+
+    const { accountSid, authToken, fromNumber } = credentials.twilio;
     const client = twilio(accountSid, authToken);
 
-    // WhatsApp requires the format: whatsapp:+number
+    // WhatsApp requires whatsapp: prefix
     const whatsappFromNumber = `whatsapp:${fromNumber}`;
     const whatsappToNumber = `whatsapp:${to}`;
+
+    console.log(`💬 Sending WhatsApp to ${to}...`);
 
     const result = await client.messages.create({
       body: message,
@@ -129,14 +202,16 @@ app.post('/api/send-whatsapp', async (req, res) => {
       to: whatsappToNumber
     });
 
+    console.log(`✅ WhatsApp sent! Message SID: ${result.sid}`);
+
     return res.json({
       success: true,
-      message: 'WhatsApp message sent successfully!',
+      message: 'WhatsApp sent successfully!',
       messageSid: result.sid,
       status: result.status
     });
   } catch (error) {
-    console.error('WhatsApp sending error:', error.message);
+    console.error('❌ WhatsApp error:', error.message);
     return res.status(400).json({
       success: false,
       message: `Failed to send WhatsApp: ${error.message}`
@@ -145,121 +220,22 @@ app.post('/api/send-whatsapp', async (req, res) => {
 });
 
 // ============================================
-// AWS SNS ROUTES
-// ============================================
-
-// Test AWS SNS Connection
-app.post('/api/test-aws', async (req, res) => {
-  try {
-    const { accessKeyId, secretAccessKey, region } = req.body;
-
-    if (!accessKeyId || !secretAccessKey || !region) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Missing required fields: accessKeyId, secretAccessKey, region' 
-      });
-    }
-
-    const sns = new AWS.SNS({
-      accessKeyId,
-      secretAccessKey,
-      region
-    });
-
-    // Try to list topics to verify credentials
-    const data = await sns.listTopics().promise();
-
-    return res.json({
-      success: true,
-      message: 'AWS SNS connection successful!',
-      topicsCount: data.Topics.length
-    });
-  } catch (error) {
-    console.error('AWS error:', error.message);
-    return res.status(400).json({
-      success: false,
-      message: `AWS SNS error: ${error.message}`,
-      details: 'Check your AWS credentials and region'
-    });
-  }
-});
-
-// Send SMS via AWS SNS
-app.post('/api/send-aws-sms', async (req, res) => {
-  try {
-    const { to, message, accessKeyId, secretAccessKey, region } = req.body;
-
-    if (!to || !message || !accessKeyId || !secretAccessKey || !region) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Missing required fields' 
-      });
-    }
-
-    const sns = new AWS.SNS({
-      accessKeyId,
-      secretAccessKey,
-      region
-    });
-
-    // AWS requires format: +countrcode + number
-    const params = {
-      Message: message,
-      PhoneNumber: to
-    };
-
-    const data = await sns.publish(params).promise();
-
-    return res.json({
-      success: true,
-      message: 'SMS sent via AWS SNS successfully!',
-      messageId: data.MessageId
-    });
-  } catch (error) {
-    console.error('AWS SMS error:', error.message);
-    return res.status(400).json({
-      success: false,
-      message: `Failed to send SMS via AWS: ${error.message}`
-    });
-  }
-});
-
-// ============================================
 // GENERAL ROUTES
 // ============================================
-
-// Get stored credentials (for display purposes)
-app.get('/api/credentials', (req, res) => {
-  const maskedCreds = {};
-  
-  if (credentials.twilio) {
-    maskedCreds.twilio = {
-      accountSid: credentials.twilio.accountSid.substring(0, 10) + '...',
-      fromNumber: credentials.twilio.fromNumber
-    };
-  }
-  
-  if (credentials.aws) {
-    maskedCreds.aws = {
-      region: credentials.aws.region
-    };
-  }
-
-  res.json(maskedCreds);
-});
 
 // Health check
 app.get('/api/health', (req, res) => {
   res.json({
     status: 'Server is running',
     timestamp: new Date().toISOString(),
-    version: '1.0.0'
+    version: '2.0.0',
+    twilioConfigured: !!credentials.twilio
   });
 });
 
 // Error handling middleware
 app.use((err, req, res, next) => {
-  console.error(err.stack);
+  console.error('❌ Error:', err.stack);
   res.status(500).json({
     success: false,
     message: 'Internal server error',
@@ -270,17 +246,24 @@ app.use((err, req, res, next) => {
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`
-╔══════════════════════════════════════════╗
-║  Apartment Manager Server Running       ║
-║  Port: ${PORT}                              ║
-║  API Base: http://localhost:${PORT}/api   ║
-╚══════════════════════════════════════════╝
+╔══════════════════════════════════════════════════════════╗
+║     Apartment Manager Server (v2.0 - With SMS)          ║
+║  ✅ Express Server Running                               ║
+║  ✅ CORS Enabled                                         ║
+║  ✅ Twilio Integration Ready                             ║
+║                                                          ║
+║  Port: ${PORT}                                              ║
+║  API Base: http://localhost:${PORT}/api                  ║
+║                                                          ║
+║  Available Endpoints:                                    ║
+║  - POST /api/save-twilio-config    (Save credentials)   ║
+║  - POST /api/test-twilio           (Test connection)    ║
+║  - GET  /api/twilio-status         (Check status)       ║
+║  - POST /api/send-sms              (Send SMS)           ║
+║  - POST /api/send-whatsapp         (Send WhatsApp)      ║
+║  - GET  /api/health                (Health check)       ║
+║                                                          ║
+║  🎉 Ready to receive Twilio credentials from frontend!  ║
+╚══════════════════════════════════════════════════════════╝
   `);
-  console.log('Available endpoints:');
-  console.log('  POST /api/test-twilio');
-  console.log('  POST /api/send-sms');
-  console.log('  POST /api/send-whatsapp');
-  console.log('  POST /api/test-aws');
-  console.log('  POST /api/send-aws-sms');
-  console.log('  GET  /api/health');
 });
